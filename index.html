@@ -91,6 +91,7 @@
   .user-info{text-align:center;margin-top:8px;font-family:'DM Mono',monospace;font-size:9px;color:var(--text-muted);letter-spacing:0.1em;}
   .user-info button{background:none;border:none;color:var(--text-muted);cursor:pointer;font-family:'DM Mono',monospace;font-size:9px;text-decoration:underline;padding:0;margin-left:8px;}
   .error-msg{font-family:'DM Mono',monospace;font-size:11px;color:var(--danger);letter-spacing:0.1em;margin-top:8px;text-align:center;min-height:16px;}
+  .success-msg{font-family:'DM Mono',monospace;font-size:11px;color:var(--success);letter-spacing:0.1em;margin-top:8px;text-align:center;min-height:16px;}
   .interim-text{color:var(--text-dim);font-style:italic;}
   @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(196,112,112,0.3)}50%{box-shadow:0 0 0 12px rgba(196,112,112,0)}}
   @keyframes blink{0%,80%,100%{opacity:0.2}40%{opacity:1}}
@@ -108,6 +109,7 @@
     </div>
   </div>
 
+  <!-- SETUP -->
   <div id="screen-setup" class="screen active">
     <div class="card">
       <div class="card-label">configuration · une seule fois</div>
@@ -127,13 +129,16 @@
     </div>
   </div>
 
+  <!-- AUTH -->
   <div id="screen-auth" class="screen">
     <div class="card">
-      <div class="card-label">connexion</div>
-      <p>Connecte-toi pour accéder à ton journal depuis n'importe quel appareil.</p>
+      <div class="card-label">connexion par lien email</div>
+      <p>Entre ton adresse email — tu recevras un lien magique pour te connecter, sans mot de passe.</p>
+      <input class="input-field" type="email" id="email-input" placeholder="ton@email.com" autocomplete="email">
       <div class="error-msg" id="auth-error"></div>
+      <div class="success-msg" id="auth-success"></div>
       <div class="btn-row" style="margin-top:8px">
-        <button class="btn btn-primary" onclick="doSignIn()">continuer avec Google →</button>
+        <button class="btn btn-primary" id="send-link-btn" onclick="sendEmailLink()">envoyer le lien →</button>
       </div>
       <div style="text-align:center;margin-top:16px">
         <button class="btn btn-ghost" onclick="resetConfig()" style="font-size:9px;padding:8px 16px">changer de configuration</button>
@@ -141,6 +146,19 @@
     </div>
   </div>
 
+  <!-- EMAIL SENT -->
+  <div id="screen-email-sent" class="screen">
+    <div class="card" style="text-align:center">
+      <div style="font-size:32px;margin-bottom:20px;opacity:0.6">✉️</div>
+      <div class="card-label">lien envoyé</div>
+      <p>Vérifie ta boîte mail et clique sur le lien pour te connecter.<br>Reviens ensuite sur cette app.</p>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn btn-ghost" onclick="showScreen('auth')">renvoyer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RECORD -->
   <div id="screen-record" class="screen">
     <div id="phase-flux">
       <div class="phase-label">phase 1 · flux libre</div>
@@ -157,14 +175,12 @@
         <button class="btn btn-primary" id="flux-next-btn" onclick="goToQuestions()" style="display:none">continuer →</button>
       </div>
     </div>
-
     <div id="phase-loading" style="display:none">
       <div class="loading-state">
         <div class="loading-dots"><span></span><span></span><span></span></div>
         <div class="loading-text">lecture de ta journée...</div>
       </div>
     </div>
-
     <div id="phase-questions" style="display:none">
       <div class="phase-label">phase 2 · questions du soir</div>
       <div class="phase-title" style="margin-bottom:8px">Pour aller plus loin</div>
@@ -173,7 +189,6 @@
       <div id="questions-container"></div>
       <div class="btn-row"><button class="btn btn-success" onclick="saveEntry()">✦ sauvegarder</button></div>
     </div>
-
     <div id="phase-saved" style="display:none">
       <div style="text-align:center;padding:48px 0">
         <div style="font-size:36px;margin-bottom:20px;opacity:0.6">✦</div>
@@ -206,321 +221,216 @@
 <div class="notif-banner" id="notif"></div>
 
 <script>
-// ─── UTILS ────────────────────────────────────────────────────────────────────
 function showScreen(n){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById('screen-'+n).classList.add('active');}
 function notif(msg){const el=document.getElementById('notif');el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),3000);}
 window.showTab=(tab)=>{showScreen(tab);document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));const nb=document.getElementById('nav-'+tab);if(nb)nb.classList.add('active');if(tab==='journal')renderJournal();if(tab==='tendances')renderTendances();};
 document.getElementById('current-date').textContent=new Date().toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
 
 // ─── SPEECH ───────────────────────────────────────────────────────────────────
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null;
-let recActive = false;      // user wants mic on
-let recTarget = null;       // 'main' or question index
-let timerInterval, timerSeconds = 0;
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let rec=null,recActive=false,recTarget=null,timerInterval,timerSeconds=0;
 
-function buildRec() {
-  if (!SR) return null;
-  const r = new SR();
-  r.lang = 'fr-FR';
-  r.continuous = false;     // iOS requires false; we restart manually
-  r.interimResults = true;
-  r.maxAlternatives = 1;
-
-  r.onresult = (e) => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) {
-        appendFinal(recTarget, t + ' ');
-      } else {
-        interim = t;
-      }
+function buildRec(){
+  if(!SR)return null;
+  const r=new SR();
+  r.lang='fr-FR';r.continuous=false;r.interimResults=true;r.maxAlternatives=1;
+  r.onresult=(e)=>{
+    let interim='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t=e.results[i][0].transcript;
+      if(e.results[i].isFinal){appendFinal(recTarget,t+' ');}
+      else{interim=t;}
     }
-    updateInterim(recTarget, interim);
+    updateInterim(recTarget,interim);
   };
-
-  r.onerror = (e) => {
-    if (e.error === 'not-allowed') { notif('Autorise le microphone dans les réglages'); recActive = false; updateUI(false); }
-    // other errors (no-speech, aborted): just restart below
-  };
-
-  r.onend = () => {
-    updateInterim(recTarget, ''); // clear interim
-    if (recActive) {
-      // auto-restart for iOS
-      setTimeout(() => { if (recActive) { rec = buildRec(); rec.start(); } }, 100);
-    } else {
-      updateUI(false);
-    }
-  };
-
+  r.onerror=(e)=>{if(e.error==='not-allowed'){notif('Autorise le microphone dans les réglages');recActive=false;updateUI(false);}};
+  r.onend=()=>{updateInterim(recTarget,'');if(recActive){setTimeout(()=>{if(recActive){rec=buildRec();rec.start();}},100);}else{updateUI(false);}};
   return r;
 }
 
-function appendFinal(target, text) {
-  if (target === 'main') {
-    const box = document.getElementById('flux-transcript');
-    box.dataset.final = (box.dataset.final || '') + text;
-    box.classList.add('has-text');
-    document.getElementById('flux-next-btn').style.display = 'inline-flex';
-  } else {
-    const d = document.getElementById(`answer-${target}`);
-    if (d) d.dataset.final = (d.dataset.final || '') + text;
-  }
-  updateInterim(target, '');
+function appendFinal(target,text){
+  if(target==='main'){const box=document.getElementById('flux-transcript');box.dataset.final=(box.dataset.final||'')+text;box.classList.add('has-text');document.getElementById('flux-next-btn').style.display='inline-flex';}
+  else{const d=document.getElementById(`answer-${target}`);if(d)d.dataset.final=(d.dataset.final||'')+text;}
+  updateInterim(target,'');
 }
 
-function updateInterim(target, interim) {
-  if (target === 'main') {
-    const box = document.getElementById('flux-transcript');
-    const fin = box.dataset.final || '';
-    box.innerHTML = fin + (interim ? `<span class="interim-text">${interim}</span>` : '');
-    if (!fin && !interim) { box.textContent = 'Ta voix apparaîtra ici...'; box.classList.remove('has-text'); }
-  } else if (target !== null) {
-    const d = document.getElementById(`answer-${target}`);
-    if (d) {
-      const fin = d.dataset.final || '';
-      d.innerHTML = fin + (interim ? `<span class="interim-text">${interim}</span>` : '');
-      if (!fin && !interim) d.textContent = 'appuie sur le micro pour répondre...';
-    }
-  }
+function updateInterim(target,interim){
+  if(target==='main'){const box=document.getElementById('flux-transcript');const fin=box.dataset.final||'';box.innerHTML=fin+(interim?`<span class="interim-text">${interim}</span>`:'');if(!fin&&!interim){box.textContent='Ta voix apparaîtra ici...';box.classList.remove('has-text');}}
+  else if(target!==null){const d=document.getElementById(`answer-${target}`);if(d){const fin=d.dataset.final||'';d.innerHTML=fin+(interim?`<span class="interim-text">${interim}</span>`:'');if(!fin&&!interim)d.textContent='appuie sur le micro pour répondre...';}}
 }
 
-function updateUI(active) {
-  if (recTarget === 'main') {
-    document.getElementById('main-record-btn').classList.toggle('recording', active);
-    document.getElementById('main-status').textContent = active ? 'en écoute...' : (document.getElementById('flux-transcript').dataset.final?.trim() ? 'terminé' : 'appuyer pour parler');
-    document.getElementById('main-status').classList.toggle('active', active);
-    if (active) { document.getElementById('main-timer').style.display = 'block'; if (!timerInterval) startTimer(); }
-    else { stopTimer(); }
-  } else if (recTarget !== null) {
-    const btn = document.querySelector(`[data-q="${recTarget}"]`);
-    if (btn) btn.classList.toggle('recording', active);
-  }
+function updateUI(active){
+  if(recTarget==='main'){
+    document.getElementById('main-record-btn').classList.toggle('recording',active);
+    document.getElementById('main-status').textContent=active?'en écoute...':(document.getElementById('flux-transcript').dataset.final?.trim()?'terminé':'appuyer pour parler');
+    document.getElementById('main-status').classList.toggle('active',active);
+    if(active){document.getElementById('main-timer').style.display='block';if(!timerInterval)startTimer();}
+    else{stopTimer();}
+  } else if(recTarget!==null){const btn=document.querySelector(`[data-q="${recTarget}"]`);if(btn)btn.classList.toggle('recording',active);}
 }
 
-function startSpeech(target) {
-  if (!SR) { notif('Reconnaissance vocale non supportée'); return; }
-  recActive = true;
-  recTarget = target;
-  updateUI(true);
-  rec = buildRec();
-  rec.start();
-}
-
-function stopSpeech() {
-  recActive = false;
-  if (rec) { try { rec.stop(); } catch(e) {} }
-  updateUI(false);
-}
-
+function startSpeech(target){if(!SR){notif('Reconnaissance vocale non supportée');return;}recActive=true;recTarget=target;updateUI(true);rec=buildRec();rec.start();}
+function stopSpeech(){recActive=false;if(rec){try{rec.stop();}catch(e){}}updateUI(false);}
 function startTimer(){timerSeconds=0;timerInterval=setInterval(()=>{timerSeconds++;const m=Math.floor(timerSeconds/60),s=timerSeconds%60;const el=document.getElementById('main-timer');if(el)el.textContent=`${m}:${s.toString().padStart(2,'0')}`;},1000);}
 function stopTimer(){clearInterval(timerInterval);timerInterval=null;const el=document.getElementById('main-timer');if(el)el.style.display='none';}
 
-window.toggleMainRec = () => {
-  if (recActive && recTarget === 'main') { stopSpeech(); }
-  else { if (recActive) stopSpeech(); setTimeout(() => startSpeech('main'), 150); }
-};
-
-window.toggleQRec = (qi) => {
-  if (recActive && recTarget === qi) { stopSpeech(); }
-  else { if (recActive) stopSpeech(); setTimeout(() => startSpeech(qi), 150); }
-};
-
-window.clearFlux = () => {
-  if (recActive && recTarget === 'main') stopSpeech();
-  const box = document.getElementById('flux-transcript');
-  box.textContent = 'Ta voix apparaîtra ici...';
-  box.classList.remove('has-text');
-  box.dataset.final = '';
-  document.getElementById('flux-next-btn').style.display = 'none';
-  document.getElementById('main-status').textContent = 'appuyer pour parler';
-};
+window.toggleMainRec=()=>{if(recActive&&recTarget==='main'){stopSpeech();}else{if(recActive)stopSpeech();setTimeout(()=>startSpeech('main'),150);}};
+window.toggleQRec=(qi)=>{if(recActive&&recTarget===qi){stopSpeech();}else{if(recActive)stopSpeech();setTimeout(()=>startSpeech(qi),150);}};
+window.clearFlux=()=>{if(recActive&&recTarget==='main')stopSpeech();const box=document.getElementById('flux-transcript');box.textContent='Ta voix apparaîtra ici...';box.classList.remove('has-text');box.dataset.final='';document.getElementById('flux-next-btn').style.display='none';document.getElementById('main-status').textContent='appuyer pour parler';};
 
 // ─── QUESTIONS ────────────────────────────────────────────────────────────────
-let currentFluxText = '', currentQuestions = [], currentAnswers = {};
+let currentFluxText='',currentQuestions=[],currentAnswers={};
 
-window.goToQuestions = async () => {
-  if (recActive) stopSpeech();
-  const box = document.getElementById('flux-transcript');
-  currentFluxText = box.dataset.final || box.textContent || '';
-  document.getElementById('phase-flux').style.display = 'none';
-  document.getElementById('phase-loading').style.display = 'block';
-  currentQuestions = await genQuestions(currentFluxText);
-  document.getElementById('phase-loading').style.display = 'none';
-  document.getElementById('phase-questions').style.display = 'block';
+window.goToQuestions=async()=>{
+  if(recActive)stopSpeech();
+  const box=document.getElementById('flux-transcript');
+  currentFluxText=box.dataset.final||box.textContent||'';
+  document.getElementById('phase-flux').style.display='none';
+  document.getElementById('phase-loading').style.display='block';
+  currentQuestions=await genQuestions(currentFluxText);
+  document.getElementById('phase-loading').style.display='none';
+  document.getElementById('phase-questions').style.display='block';
   renderQuestions(currentQuestions);
 };
 
-async function genQuestions(flux) {
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514", max_tokens: 1000,
-        messages: [{ role: "user", content: `Tu es un guide bienveillant spécialisé en neuroplasticité et reprogrammation positive.\n\nL'utilisatrice vient de faire son journal oral du soir :\n"${flux || "Elle n'a pas encore parlé."}"\n\nGénère exactement 3 questions courtes et profondes pour l'aider à repérer des signaux positifs, des ressources internes, ou des micro-victoires qu'elle n'a pas conscientisés. Rebondis sur ce qu'elle a dit.\n\nRéponds UNIQUEMENT avec du JSON valide, sans markdown :\n{"questions": ["Question 1 ?", "Question 2 ?", "Question 3 ?"]}`}]
-      })
-    });
-    const data = await res.json();
-    return JSON.parse((data.content?.[0]?.text||'{}').replace(/```json|```/g,'').trim()).questions || defaultQ();
-  } catch(e) { return defaultQ(); }
+async function genQuestions(flux){
+  try{
+    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:`Tu es un guide bienveillant spécialisé en neuroplasticité et reprogrammation positive.\n\nL'utilisatrice vient de faire son journal oral du soir :\n"${flux||"Elle n'a pas encore parlé."}"\n\nGénère exactement 3 questions courtes et profondes pour l'aider à repérer des signaux positifs, des ressources internes, ou des micro-victoires qu'elle n'a pas conscientisés. Rebondis sur ce qu'elle a dit.\n\nRéponds UNIQUEMENT avec du JSON valide, sans markdown :\n{"questions": ["Question 1 ?", "Question 2 ?", "Question 3 ?"]}`}]})});
+    const data=await res.json();
+    return JSON.parse((data.content?.[0]?.text||'{}').replace(/```json|```/g,'').trim()).questions||defaultQ();
+  }catch(e){return defaultQ();}
 }
 
-function defaultQ() {
-  const s = [
-    ["Quel moment de la journée t'a apporté une légèreté, même brève ?","Quelle qualité en toi as-tu mobilisée aujourd'hui sans t'en rendre compte ?","Y a-t-il quelque chose de beau ou d'inattendu que tu as croisé ?"],
-    ["Qu'est-ce que tu as accompli aujourd'hui dont tu ne t'es peut-être pas félicitée ?","Dans quel moment t'es-tu sentie pleinement toi-même ?","Quelle petite chose t'a mise de bonne humeur, même une seconde ?"],
-    ["Si tu devais garder un seul souvenir de cette journée, lequel choisirais-tu ?","Quelle force intérieure as-tu utilisée sans te l'accorder ?","Qu'est-ce qui a été plus facile que prévu aujourd'hui ?"]
-  ];
-  return s[new Date().getDay() % 3];
-}
+function defaultQ(){const s=[["Quel moment de la journée t'a apporté une légèreté, même brève ?","Quelle qualité en toi as-tu mobilisée aujourd'hui sans t'en rendre compte ?","Y a-t-il quelque chose de beau ou d'inattendu que tu as croisé ?"],["Qu'est-ce que tu as accompli aujourd'hui dont tu ne t'es peut-être pas félicitée ?","Dans quel moment t'es-tu sentie pleinement toi-même ?","Quelle petite chose t'a mise de bonne humeur, même une seconde ?"],["Si tu devais garder un seul souvenir de cette journée, lequel choisirais-tu ?","Quelle force intérieure as-tu utilisée sans te l'accorder ?","Qu'est-ce qui a été plus facile que prévu aujourd'hui ?"]];return s[new Date().getDay()%3];}
 
-function renderQuestions(qs) {
-  document.getElementById('questions-container').innerHTML = qs.map((q, i) => `
-    <div class="question-card">
-      <div class="q-label">question ${i+1}</div>
-      <div class="q-text">${q}</div>
-      <div class="answer-area">
-        <div class="answer-display" id="answer-${i}" data-final="">appuie sur le micro pour répondre...</div>
-        <button class="mini-rec-btn" data-q="${i}" onclick="toggleQRec(${i})"><div class="dot"></div></button>
-      </div>
-    </div>`).join('');
-}
+function renderQuestions(qs){document.getElementById('questions-container').innerHTML=qs.map((q,i)=>`<div class="question-card"><div class="q-label">question ${i+1}</div><div class="q-text">${q}</div><div class="answer-area"><div class="answer-display" id="answer-${i}" data-final="">appuie sur le micro pour répondre...</div><button class="mini-rec-btn" data-q="${i}" onclick="toggleQRec(${i})"><div class="dot"></div></button></div></div>`).join('');}
 
-window.saveEntry = async () => {
-  if (recActive) stopSpeech();
-  currentAnswers = {};
-  currentQuestions.forEach((_, i) => {
-    const d = document.getElementById(`answer-${i}`);
-    if (d) currentAnswers[i] = d.dataset.final || '';
-  });
-  const full = currentFluxText + ' ' + Object.values(currentAnswers).join(' ');
-  const entry = {
-    date: new Date().toISOString(),
-    flux: currentFluxText,
-    questions: currentQuestions.map((q, i) => ({ q, a: currentAnswers[i] || '' })),
-    themes: await extractThemes(full)
-  };
-  if (window._persist) await window._persist(entry);
-  entries.unshift({ id: Date.now().toString(), ...entry });
-  document.getElementById('phase-questions').style.display = 'none';
-  document.getElementById('phase-saved').style.display = 'block';
+window.saveEntry=async()=>{
+  if(recActive)stopSpeech();
+  currentAnswers={};
+  currentQuestions.forEach((_,i)=>{const d=document.getElementById(`answer-${i}`);if(d)currentAnswers[i]=d.dataset.final||'';});
+  const full=currentFluxText+' '+Object.values(currentAnswers).join(' ');
+  const entry={date:new Date().toISOString(),flux:currentFluxText,questions:currentQuestions.map((q,i)=>({q,a:currentAnswers[i]||''})),themes:await extractThemes(full)};
+  if(window._persist)await window._persist(entry);
+  entries.unshift({id:Date.now().toString(),...entry});
+  document.getElementById('phase-questions').style.display='none';
+  document.getElementById('phase-saved').style.display='block';
   notif('✦ entrée sauvegardée');
 };
 
-async function extractThemes(text) {
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:200,
-        messages:[{role:"user",content:`Extrait 3 à 5 thèmes positifs très courts (2 mots max). JSON uniquement: {"themes":["t1"]}\nTexte: "${text.substring(0,500)}"`}]})
-    });
-    const data = await res.json();
-    return JSON.parse((data.content?.[0]?.text||'{}').replace(/```json|```/g,'').trim()).themes||[];
-  } catch(e){return[];}
-}
+async function extractThemes(text){try{const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:200,messages:[{role:"user",content:`Extrait 3 à 5 thèmes positifs très courts (2 mots max). JSON uniquement: {"themes":["t1"]}\nTexte: "${text.substring(0,500)}"`}]})});const data=await res.json();return JSON.parse((data.content?.[0]?.text||'{}').replace(/```json|```/g,'').trim()).themes||[];}catch(e){return[];}}
 
-window.newEntry = () => {
-  currentFluxText='';currentQuestions=[];currentAnswers={};
-  document.getElementById('phase-flux').style.display='block';
-  document.getElementById('phase-questions').style.display='none';
-  document.getElementById('phase-saved').style.display='none';
-  window.clearFlux();
-};
+window.newEntry=()=>{currentFluxText='';currentQuestions=[];currentAnswers={};document.getElementById('phase-flux').style.display='block';document.getElementById('phase-questions').style.display='none';document.getElementById('phase-saved').style.display='none';window.clearFlux();};
 
 // ─── FIREBASE ─────────────────────────────────────────────────────────────────
-let db, auth, currentUser, entries = [];
+let db,auth,currentUser,entries=[];
+let _isSignInWithEmailLink,_sendSignInLinkToEmail,_signOut,_onAuthStateChanged;
 
-const savedConfig = localStorage.getItem('firebase_config');
-if (savedConfig) { try { bootFirebase(JSON.parse(savedConfig)); } catch(e) { localStorage.removeItem('firebase_config'); showScreen('setup'); } }
-else { showScreen('setup'); }
+const APP_URL = 'https://liliebenetti.github.io/journaling/';
 
-window.saveConfig = () => {
-  const raw = document.getElementById('firebase-config-input').value.trim();
-  document.getElementById('setup-error').textContent = '';
-  try {
-    const c = JSON.parse(raw);
-    if (!c.apiKey||!c.projectId) throw new Error();
-    localStorage.setItem('firebase_config', JSON.stringify(c));
-    bootFirebase(c);
-  } catch(e) { document.getElementById('setup-error').textContent = 'Configuration invalide — vérifie le JSON'; }
+const savedConfig=localStorage.getItem('firebase_config');
+if(savedConfig){try{bootFirebase(JSON.parse(savedConfig));}catch(e){localStorage.removeItem('firebase_config');showScreen('setup');}}
+else{showScreen('setup');}
+
+window.saveConfig=()=>{
+  const raw=document.getElementById('firebase-config-input').value.trim();
+  document.getElementById('setup-error').textContent='';
+  try{const c=JSON.parse(raw);if(!c.apiKey||!c.projectId)throw new Error();localStorage.setItem('firebase_config',JSON.stringify(c));bootFirebase(c);}
+  catch(e){document.getElementById('setup-error').textContent='Configuration invalide — vérifie le JSON';}
 };
 
-window.resetConfig = () => { localStorage.removeItem('firebase_config'); showScreen('setup'); };
+window.resetConfig=()=>{localStorage.removeItem('firebase_config');showScreen('setup');};
 
-async function bootFirebase(config) {
-  try {
-    const {initializeApp,getApps} = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
-    const {getAuth,GoogleAuthProvider,signInWithPopup,signOut,onAuthStateChanged} = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js');
-    const {getFirestore,collection,addDoc,getDocs,query,orderBy,serverTimestamp} = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+async function bootFirebase(config){
+  try{
+    const {initializeApp,getApps}=await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
+    const {getAuth,sendSignInLinkToEmail,isSignInWithEmailLink,signInWithEmailLink,signOut,onAuthStateChanged}=await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js');
+    const {getFirestore,collection,addDoc,getDocs,query,orderBy,serverTimestamp}=await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
 
-    const app = getApps().length ? getApps()[0] : initializeApp(config);
-    auth = getAuth(app); db = getFirestore(app);
+    const app=getApps().length?getApps()[0]:initializeApp(config);
+    auth=getAuth(app);db=getFirestore(app);
+    _isSignInWithEmailLink=isSignInWithEmailLink;
+    _sendSignInLinkToEmail=sendSignInLinkToEmail;
+    _signOut=signOut;
 
-    window.doSignIn = async () => {
-      document.getElementById('auth-error').textContent = '';
-      try { await signInWithPopup(auth, new GoogleAuthProvider()); }
-      catch(e) { if(e.code!=='auth/popup-closed-by-user') document.getElementById('auth-error').textContent = 'Erreur — réessaie'; }
+    // Check if arriving from email link
+    if(isSignInWithEmailLink(auth,window.location.href)){
+      let email=localStorage.getItem('emailForSignIn');
+      if(!email){email=window.prompt('Confirme ton adresse email :');}
+      try{
+        await signInWithEmailLink(auth,email,window.location.href);
+        localStorage.removeItem('emailForSignIn');
+        window.history.replaceState({},'',APP_URL);
+      }catch(e){notif('Lien invalide ou expiré');}
+    }
+
+    window.sendEmailLink=async()=>{
+      const email=document.getElementById('email-input').value.trim();
+      document.getElementById('auth-error').textContent='';
+      document.getElementById('auth-success').textContent='';
+      if(!email){document.getElementById('auth-error').textContent='Entre ton adresse email';return;}
+      const btn=document.getElementById('send-link-btn');
+      btn.textContent='envoi...';btn.disabled=true;
+      try{
+        await sendSignInLinkToEmail(auth,email,{url:APP_URL,handleCodeInApp:true});
+        localStorage.setItem('emailForSignIn',email);
+        showScreen('email-sent');
+      }catch(e){
+        document.getElementById('auth-error').textContent='Erreur — vérifie l\'adresse email';
+      }
+      btn.textContent='envoyer le lien →';btn.disabled=false;
     };
 
-    window.doSignOut = async () => { await signOut(auth); };
+    window.doSignOut=async()=>{await signOut(auth);};
 
-    window._persist = async (entry) => {
-      try { await addDoc(collection(db,'users',currentUser.uid,'entries'),{...entry,createdAt:serverTimestamp()}); }
-      catch(e) { const l=JSON.parse(localStorage.getItem('rituel_entries')||'[]');l.unshift(entry);localStorage.setItem('rituel_entries',JSON.stringify(l));notif('Sauvegarde locale'); }
+    window._persist=async(entry)=>{
+      try{await addDoc(collection(db,'users',currentUser.uid,'entries'),{...entry,createdAt:serverTimestamp()});}
+      catch(e){const l=JSON.parse(localStorage.getItem('rituel_entries')||'[]');l.unshift(entry);localStorage.setItem('rituel_entries',JSON.stringify(l));notif('Sauvegarde locale');}
     };
 
-    window._loadEntries = async () => {
-      try {
-        const q = query(collection(db,'users',currentUser.uid,'entries'),orderBy('createdAt','desc'));
-        const snap = await getDocs(q);
-        entries = snap.docs.map(d=>({id:d.id,...d.data()}));
-      } catch(e) { entries=JSON.parse(localStorage.getItem('rituel_entries')||'[]'); }
+    window._loadEntries=async()=>{
+      try{const q=query(collection(db,'users',currentUser.uid,'entries'),orderBy('createdAt','desc'));const snap=await getDocs(q);entries=snap.docs.map(d=>({id:d.id,...d.data()}));}
+      catch(e){entries=JSON.parse(localStorage.getItem('rituel_entries')||'[]');}
     };
 
-    onAuthStateChanged(auth, user => {
-      if (user) {
+    onAuthStateChanged(auth,user=>{
+      if(user){
         currentUser=user;
         document.getElementById('user-info').style.display='block';
         document.getElementById('user-email').textContent=user.email;
         document.getElementById('bottom-nav').style.display='flex';
         showScreen('record');
         window._loadEntries();
-      } else {
+      }else{
         currentUser=null;
         document.getElementById('user-info').style.display='none';
         document.getElementById('bottom-nav').style.display='none';
         showScreen('auth');
       }
     });
-  } catch(e) {
+
+  }catch(e){
     console.error(e);
     localStorage.removeItem('firebase_config');
-    document.getElementById('setup-error').textContent='Erreur Firebase';
+    document.getElementById('setup-error').textContent='Erreur Firebase — vérifie ta configuration';
     showScreen('setup');
   }
 }
 
 // ─── JOURNAL ──────────────────────────────────────────────────────────────────
-function renderJournal() {
+function renderJournal(){
   const c=document.getElementById('entries-container');
   document.getElementById('journal-list').style.display='block';
   document.getElementById('journal-detail').style.display='none';
   if(!entries.length){c.innerHTML='<div class="empty-state"><div class="symbol">✦</div><p>Ton journal est encore vide.<br>Commence ton premier rituel ce soir.</p></div>';return;}
-  c.innerHTML=entries.map(e=>{
-    const ds=new Date(e.date).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});
-    const pv=e.flux?e.flux.substring(0,100)+'...':'Entrée sans flux libre.';
-    const tg=(e.themes||[]).map(t=>`<span class="tag">${t}</span>`).join('');
-    return `<div class="entry-card" onclick="showEntry('${e.id}')"><div class="entry-date">${ds}</div><div class="entry-preview">${pv}</div>${tg?`<div class="entry-tags">${tg}</div>`:''}</div>`;
-  }).join('');
+  c.innerHTML=entries.map(e=>{const ds=new Date(e.date).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});const pv=e.flux?e.flux.substring(0,100)+'...':'Entrée sans flux libre.';const tg=(e.themes||[]).map(t=>`<span class="tag">${t}</span>`).join('');return`<div class="entry-card" onclick="showEntry('${e.id}')"><div class="entry-date">${ds}</div><div class="entry-preview">${pv}</div>${tg?`<div class="entry-tags">${tg}</div>`:''}</div>`;}).join('');
 }
 
-window.showEntry = (id) => {
-  const e=entries.find(x=>x.id===id); if(!e) return;
+window.showEntry=(id)=>{
+  const e=entries.find(x=>x.id===id);if(!e)return;
   const ds=new Date(e.date).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
   document.getElementById('journal-list').style.display='none';
-  const det=document.getElementById('journal-detail'); det.style.display='block';
+  const det=document.getElementById('journal-detail');det.style.display='block';
   const qas=(e.questions||[]).map((qa,i)=>`<div class="entry-section"><div class="entry-section-label">question ${i+1}</div><div class="entry-section-content" style="font-style:normal;font-size:14px;color:var(--text-dim);margin-bottom:6px">${qa.q}</div><div class="entry-section-content">${qa.a||'—'}</div></div>`).join('');
   const th=(e.themes||[]).map(t=>`<span class="theme-pill">${t}</span>`).join('');
   det.innerHTML=`<button class="back-btn" onclick="renderJournal()">← retour</button><div class="phase-label">${ds}</div><div class="entry-section"><div class="entry-section-label">flux libre</div><div class="entry-section-content">${e.flux||'—'}</div></div>${qas}${th?`<div class="entry-section"><div class="entry-section-label">thèmes</div><div class="themes-cloud">${th}</div></div>`:''}`;
@@ -528,7 +438,7 @@ window.showEntry = (id) => {
 window.renderJournal=renderJournal;
 
 // ─── TENDANCES ────────────────────────────────────────────────────────────────
-function renderTendances() {
+function renderTendances(){
   const c=document.getElementById('tendances-content');
   if(entries.length<2){c.innerHTML=`<div class="stats-grid"><div class="stat-card"><span class="stat-number">${entries.length}</span><span class="stat-label">entrée${entries.length>1?'s':''}</span></div><div class="stat-card"><span class="stat-number">—</span><span class="stat-label">streak</span></div><div class="stat-card"><span class="stat-number">—</span><span class="stat-label">thèmes</span></div></div><div class="empty-state"><div class="symbol">✦</div><p>Les tendances apparaîtront après quelques entrées.</p></div>`;return;}
   const streak=calcStreak();
@@ -537,7 +447,6 @@ function renderTendances() {
   const top=Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,10);
   c.innerHTML=`<div class="stats-grid"><div class="stat-card"><span class="stat-number">${entries.length}</span><span class="stat-label">entrées</span></div><div class="stat-card"><span class="stat-number">${streak}</span><span class="stat-label">streak</span></div><div class="stat-card"><span class="stat-number">${top.length}</span><span class="stat-label">thèmes</span></div></div><div class="divider"><span>✦</span></div><div class="phase-label" style="text-align:left;margin-bottom:14px">thèmes récurrents</div><div class="themes-cloud" style="margin-bottom:28px">${top.map(([t,n])=>`<span class="theme-pill">${t} <span style="opacity:0.5">${n}</span></span>`).join('')}</div><div class="phase-label" style="text-align:left;margin-bottom:14px">dernières entrées</div>${entries.slice(0,7).map(e=>{const d=new Date(e.date);return`<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--text-muted);font-family:'DM Mono',monospace;font-size:10px;color:var(--text-dim)"><span>${d.toLocaleDateString('fr-FR',{weekday:'short',day:'numeric',month:'short'})}</span><span>${(e.themes||[]).slice(0,3).join(' · ')||'—'}</span></div>`;}).join('')}`;
 }
-
 function calcStreak(){if(!entries.length)return 0;let s=1;for(let i=0;i<entries.length-1;i++){if((new Date(entries[i].date)-new Date(entries[i+1].date))/86400000<1.5)s++;else break;}return s;}
 </script>
 </body>
